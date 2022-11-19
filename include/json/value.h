@@ -287,8 +287,8 @@ private:
 
     char const* cstr_; // actually, a prefixed string, unless policy is noDup
     union {
-      ArrayIndex index_;
-      StringStorage storage_;
+      ArrayIndex index_;  // arrayValue使用, 存储index
+      StringStorage storage_;  // objectValue使用, 存储object的key(string)相关信息, 复制策略&长度
     };
   };
 

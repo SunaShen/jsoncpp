@@ -177,6 +177,7 @@ String valueToString(double value, unsigned int precision,
 
 String valueToString(bool value) { return value ? "true" : "false"; }
 
+// 是否存在'\','"',< 0x20, >0x7f的字符
 static bool doesAnyCharRequireEscaping(char const* s, size_t n) {
   assert(s || !n);
 
@@ -253,6 +254,7 @@ static const char hex2[] = "000102030405060708090a0b0c0d0e0f"
                            "e0e1e2e3e4e5e6e7e8e9eaebecedeeef"
                            "f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff";
 
+// 打表法
 static String toHex16Bit(unsigned int x) {
   const unsigned int hi = (x >> 8) & 0xff;
   const unsigned int lo = x & 0xff;
@@ -277,6 +279,7 @@ static String valueToQuotedStringN(const char* value, size_t length,
   if (value == nullptr)
     return "";
 
+  // 无特殊字符，直接返回 前后添加 '"' 返回即可
   if (!doesAnyCharRequireEscaping(value, length))
     return String("\"") + value + "\"";
   // We have to walk value and escape any special characters.
@@ -370,6 +373,8 @@ void FastWriter::dropNullPlaceholders() { dropNullPlaceholders_ = true; }
 
 void FastWriter::omitEndingLineFeed() { omitEndingLineFeed_ = true; }
 
+// 不包含注释
+// 不换行
 String FastWriter::write(const Value& root) {
   document_.clear();
   writeValue(root);
@@ -399,6 +404,7 @@ void FastWriter::writeValue(const Value& value) {
     char const* end;
     bool ok = value.getString(&str, &end);
     if (ok)
+      // 字符串转换,前后添加'"',并处理转义字符和unicode编码问题
       document_ += valueToQuotedStringN(str, static_cast<size_t>(end - str));
     break;
   }
@@ -411,6 +417,7 @@ void FastWriter::writeValue(const Value& value) {
     for (ArrayIndex index = 0; index < size; ++index) {
       if (index > 0)
         document_ += ',';
+      // 递归子节点
       writeValue(value[index]);
     }
     document_ += ']';
@@ -419,11 +426,13 @@ void FastWriter::writeValue(const Value& value) {
     Value::Members members(value.getMemberNames());
     document_ += '{';
     for (auto it = members.begin(); it != members.end(); ++it) {
+      // 获取member名
       const String& name = *it;
       if (it != members.begin())
         document_ += ',';
       document_ += valueToQuotedStringN(name.data(), name.length());
       document_ += yamlCompatibilityEnabled_ ? ": " : ":";
+      // 递归子节点
       writeValue(value[name]);
     }
     document_ += '}';
@@ -436,6 +445,8 @@ void FastWriter::writeValue(const Value& value) {
 
 StyledWriter::StyledWriter() = default;
 
+// 包含注释
+// 包含换行
 String StyledWriter::write(const Value& root) {
   document_.clear();
   addChildValues_ = false;
@@ -490,14 +501,19 @@ void StyledWriter::writeValue(const Value& value) {
         const String& name = *it;
         const Value& childValue = value[name];
         writeCommentBeforeValue(childValue);
+        // 输出member
         writeWithIndent(valueToQuotedString(name.c_str()));
         document_ += " : ";
+        // 递归处理子节点
         writeValue(childValue);
         if (++it == members.end()) {
           writeCommentAfterValueOnSameLine(childValue);
           break;
         }
         document_ += ',';
+        // 换行处理:
+        // 1. 有注释的情况下会增加换行
+        // 2. 无注释的情况下使用writeWithIndent中的writeIndent来实现, writeIndent发现当前换过行就不会再执行换行了
         writeCommentAfterValueOnSameLine(childValue);
       }
       unindent();
@@ -507,14 +523,17 @@ void StyledWriter::writeValue(const Value& value) {
   }
 }
 
+// 输出array
 void StyledWriter::writeArrayValue(const Value& value) {
   size_t size = value.size();
   if (size == 0)
     pushValue("[]");
   else {
+    // 根据设定的宽度rightMargin_{74},判断一行是否可以显示
     bool isArrayMultiLine = isMultilineArray(value);
     if (isArrayMultiLine) {
       writeWithIndent("[");
+      // 缩进++
       indent();
       bool hasChildValue = !childValues_.empty();
       ArrayIndex index = 0;
@@ -522,22 +541,33 @@ void StyledWriter::writeArrayValue(const Value& value) {
         const Value& childValue = value[index];
         writeCommentBeforeValue(childValue);
         if (hasChildValue)
+          // 复用isMultilineArray中遍历元素获得的值childValues_,更加高效
           writeWithIndent(childValues_[index]);
         else {
+          // isMultilineArray 未获得元素的输出,只能自己重新遍历
           writeIndent();
           writeValue(childValue);
         }
         if (++index == size) {
+          // 所有元素遍历完成，补充行后注释后返回
           writeCommentAfterValueOnSameLine(childValue);
           break;
         }
         document_ += ',';
+        // 多行显示","后应该有换行
+        // 换行处理:
+        // 1. 有注释的情况下会增加换行
+        // 2. 无注释的情况下使用writeIndent来实现,writeWithIndent中也会调用writeIndent
+        //    writeIndent发现当前换过行就不会再执行换行了
         writeCommentAfterValueOnSameLine(childValue);
       }
       unindent();
       writeWithIndent("]");
     } else // output on a single line
     {
+      // 一行显示不需要考虑indent!
+      // 正常array都是属于object的一个menber下的，直接跟在menber下，无需另起一行以及调整缩进了。
+      // 形式：  test : [1,2,3,4,5]
       assert(childValues_.size() == size);
       document_ += "[ ";
       for (size_t index = 0; index < size; ++index) {
@@ -552,22 +582,32 @@ void StyledWriter::writeArrayValue(const Value& value) {
 
 bool StyledWriter::isMultilineArray(const Value& value) {
   ArrayIndex const size = value.size();
+  // size * 3 >= rightMargin_ 必定超
+  // 最短的情况为个位数 + " " + "," 即 [1, 2, 3, 4, 5]
   bool isMultiLine = size * 3 >= rightMargin_;
   childValues_.clear();
   for (ArrayIndex index = 0; index < size && !isMultiLine; ++index) {
     const Value& childValue = value[index];
+    // 有非空的object或array都是必不能在一行展示的
     isMultiLine = ((childValue.isArray() || childValue.isObject()) &&
                    !childValue.empty());
   }
   if (!isMultiLine) // check if line length > max line length
   {
+    // 排除了object、array特殊格式，后面基础类型就老实统计长度
     childValues_.reserve(size);
     addChildValues_ = true;
     ArrayIndex lineLength = 4 + (size - 1) * 2; // '[ ' + ', '*n + ' ]'
     for (ArrayIndex index = 0; index < size; ++index) {
+      // 有注释，必换行
       if (hasCommentForValue(value[index])) {
+        // 其实可以break???
+        // 降低上层处理成本，拿到的childValues_必然是完整的，不存在填充了一半的
         isMultiLine = true;
       }
+      // 递归调用,
+      // 此时有标记addChildValues_表示当前是为了统计长度
+      // 先将结果防至childValues_中，而不是直接添加到document_上
       writeValue(value[index]);
       lineLength += static_cast<ArrayIndex>(childValues_[index].length());
     }
@@ -577,6 +617,8 @@ bool StyledWriter::isMultilineArray(const Value& value) {
   return isMultiLine;
 }
 
+// 有addChildValues_标记，此时对于当前值的输出方式(多行or单行)还没确定，所以需要临时放置childValues_中
+// 后续通过isMultilineArray函数来判断
 void StyledWriter::pushValue(const String& value) {
   if (addChildValues_)
     childValues_.push_back(value);
@@ -600,23 +642,28 @@ void StyledWriter::writeWithIndent(const String& value) {
   document_ += value;
 }
 
+// 控制缩进值, 每递归一层调用一次indent
 void StyledWriter::indent() { indentString_ += String(indentSize_, ' '); }
 
+// 控制缩进值, 每递归返回一层调用一次indent
 void StyledWriter::unindent() {
   assert(indentString_.size() >= indentSize_);
   indentString_.resize(indentString_.size() - indentSize_);
 }
 
+// 输出行前注释
 void StyledWriter::writeCommentBeforeValue(const Value& root) {
   if (!root.hasComment(commentBefore))
     return;
 
   document_ += '\n';
+  // 调整缩进
   writeIndent();
   const String& comment = root.getComment(commentBefore);
   String::const_iterator iter = comment.begin();
   while (iter != comment.end()) {
     document_ += *iter;
+    // 有新一行的注释，重新调整缩进
     if (*iter == '\n' && ((iter + 1) != comment.end() && *(iter + 1) == '/'))
       writeIndent();
     ++iter;
@@ -626,12 +673,15 @@ void StyledWriter::writeCommentBeforeValue(const Value& root) {
   document_ += '\n';
 }
 
+// 输出同行以及行后注释
 void StyledWriter::writeCommentAfterValueOnSameLine(const Value& root) {
   if (root.hasComment(commentAfterOnSameLine))
     document_ += " " + root.getComment(commentAfterOnSameLine);
 
   if (root.hasComment(commentAfter)) {
     document_ += '\n';
+    // todo : 需要调整缩进？？？？？
+    // writeIndent();
     document_ += root.getComment(commentAfter);
     document_ += '\n';
   }
@@ -646,6 +696,9 @@ bool StyledWriter::hasCommentForValue(const Value& value) {
 // Class StyledStreamWriter
 // //////////////////////////////////////////////////////////////////
 
+// 自定义缩进时的符号，使用indentation
+// 直接写入文件流中
+// 实现和StyledWriter基本一致
 StyledStreamWriter::StyledStreamWriter(String indentation)
     : document_(nullptr), indentation_(std::move(indentation)),
       addChildValues_(), indented_(false) {}

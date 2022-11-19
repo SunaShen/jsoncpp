@@ -148,6 +148,8 @@ bool Reader::parse(const char* beginDoc, const char* endDoc, Value& root,
   return successful;
 }
 
+// 解析函数主入口
+// object 或 array 类型,包含子节点的都会递归调用该函数，使用栈实现z深度优先遍历
 bool Reader::readValue() {
   // readValue() may call itself only if it calls readObject() or ReadArray().
   // These methods execute nodes_.push() just before and nodes_.pop)() just
@@ -201,6 +203,7 @@ bool Reader::readValue() {
   case tokenArraySeparator:
   case tokenObjectEnd:
   case tokenArrayEnd:
+    // ", }, ]" 不应该出现在这里, 应该在readObject或readArray中处理
     if (features_.allowDroppedNullPlaceholders_) {
       // "Un-read" the current token and mark the current value as a null
       // token.
@@ -235,6 +238,8 @@ void Reader::skipCommentTokens(Token& token) {
   }
 }
 
+// 只遍历原始字符串, 移动current_, 其余都不动, current_全局唯一, 且只会递增
+// 得到有效数据后返回，有效数据范围 [token.start_, token.end_) 其中token.end_ = current_
 bool Reader::readToken(Token& token) {
   skipSpaces();
   token.start_ = current_;
@@ -406,6 +411,7 @@ bool Reader::readCppStyleComment() {
   return true;
 }
 
+// 遍历数字, 移动current_, 最后赋值给token.end_
 void Reader::readNumber() {
   Location p = current_;
   char c = '0'; // stopgap for already consumed character
@@ -428,6 +434,7 @@ void Reader::readNumber() {
   }
 }
 
+// 遍历string, 移动current_, 最后赋值给token.end_
 bool Reader::readString() {
   Char c = '\0';
   while (current_ != end_) {
@@ -440,21 +447,28 @@ bool Reader::readString() {
   return c == '"';
 }
 
+// 解析object
 bool Reader::readObject(Token& token) {
   Token tokenName;
   String name;
   Value init(objectValue);
+  // currentValue取到是nodes_的top，nodes_每次都是用之前先放个空的json::value进去，因此进入处理函数先将值放进去
   currentValue().swapPayload(init);
+  // offset 记录当前json::value对应的原始字符串的位置索引。其中begin_为原始字符串其实位置
   currentValue().setOffsetStart(token.start_ - begin_);
+  // 一次while循环解析一个子节点
+  // 1~6 个步骤，7是解析完最后一个节点后退出。
   while (readToken(tokenName)) {
     bool initialTokenOk = true;
     while (tokenName.type_ == tokenComment && initialTokenOk)
       initialTokenOk = readToken(tokenName);
     if (!initialTokenOk)
       break;
+    // 0. 出口 "}", 针对空object的特例
     if (tokenName.type_ == tokenObjectEnd && name.empty()) // empty object
       return true;
     name.clear();
+    // 1. 获取member name
     if (tokenName.type_ == tokenString) {
       if (!decodeString(tokenName, name))
         return recoverFromError(tokenObjectEnd);
@@ -467,18 +481,29 @@ bool Reader::readObject(Token& token) {
       break;
     }
 
+    // 2. 查找 ":"
     Token colon;
     if (!readToken(colon) || colon.type_ != tokenMemberSeparator) {
       return addErrorAndRecover("Missing ':' after object member name", colon,
                                 tokenObjectEnd);
     }
+    // 3. 创建子节点，并入栈
+    // nodes_栈中顺序为, root*, child*,  其中 value*就是root中的 root[name]
     Value& value = currentValue()[name];
     nodes_.push(&value);
+    // 4. 递归执行解析，此时currentValue已经变为子节点value了
+    // readValue中修改currentValue，root[name]也会自动修改，自然完成了数据的解析
+    // <深度优先遍历>
     bool ok = readValue();
+    // 5. 子节点value出栈，currentValue回归为value层级
     nodes_.pop();
     if (!ok) // error already set
       return recoverFromError(tokenObjectEnd);
 
+    // 6. 前面已经是完整的一个子节点了,后续需要跟下列标记
+    // 6.1 "}" 当前object中的所有子节点都解析完了,需要一个"}"结束当前object
+    // 6.2 "," 后面是下一个子节点
+    // 6.3 "/" 后面跟着注释
     Token comma;
     if (!readToken(comma) ||
         (comma.type_ != tokenObjectEnd && comma.type_ != tokenArraySeparator &&
@@ -489,6 +514,7 @@ bool Reader::readObject(Token& token) {
     bool finalizeTokenOk = true;
     while (comma.type_ == tokenComment && finalizeTokenOk)
       finalizeTokenOk = readToken(comma);
+    // 7. 当前节点解析完毕 遇到"}", readValue递归函数出口
     if (comma.type_ == tokenObjectEnd)
       return true;
   }
@@ -496,44 +522,62 @@ bool Reader::readObject(Token& token) {
                             tokenObjectEnd);
 }
 
+// 解析array
 bool Reader::readArray(Token& token) {
   Value init(arrayValue);
+  // currentValue取到是nodes_的top，nodes_每次都是用之前先放个空的json::value进去，因此进入处理函数先将值放进去
   currentValue().swapPayload(init);
+  // offset 记录当前json::value对应的原始字符串的位置索引。其中begin_为原始字符串其实位置
   currentValue().setOffsetStart(token.start_ - begin_);
   skipSpaces();
+  // 处理空array 形式: "[]"
   if (current_ != end_ && *current_ == ']') // empty array
   {
+    // 把']'给遍历掉
     Token endArray;
     readToken(endArray);
     return true;
   }
   int index = 0;
+  // 一次while循环解析一个子节点
+  // 1~5 个步骤，6是解析完最后一个节点后退出
   for (;;) {
+    // 1. 创建子节点，并入栈
     Value& value = currentValue()[index++];
     nodes_.push(&value);
+    // 2. 递归执行解析，此时currentValue已经变为子节点value了
+    // readValue中修改currentValue，root[name]也会自动修改，自然完成了数据的解析
+    // <深度优先遍历>
     bool ok = readValue();
+    // 3. 子节点value出栈，currentValue回归为value层级
     nodes_.pop();
     if (!ok) // error already set
       return recoverFromError(tokenArrayEnd);
 
+    // 4. 解析注释
     Token currentToken;
     // Accept Comment after last item in the array.
     ok = readToken(currentToken);
     while (currentToken.type_ == tokenComment && ok) {
       ok = readToken(currentToken);
     }
+    // 5. 前面已经是完整的一个子节点了,后续需要跟下列标记
+    // 5.1 "]" 当前array中的所有子节点都解析完了,需要一个"]"结束当前array
+    // 5.2 "," 后面是下一个子节点
     bool badTokenType = (currentToken.type_ != tokenArraySeparator &&
                          currentToken.type_ != tokenArrayEnd);
     if (!ok || badTokenType) {
       return addErrorAndRecover("Missing ',' or ']' in array declaration",
                                 currentToken, tokenArrayEnd);
     }
+    // 6. 当前节点解析完毕 遇到"]", readValue递归函数出口
     if (currentToken.type_ == tokenArrayEnd)
       break;
   }
   return true;
 }
 
+// 解析number类型
 bool Reader::decodeNumber(Token& token) {
   Value decoded;
   if (!decodeNumber(token, decoded))
@@ -548,6 +592,8 @@ bool Reader::decodeNumber(Token& token, Value& decoded) {
   // Attempts to parse the number as an integer. If the number is
   // larger than the maximum supported value of an integer then
   // we decode the number as a double.
+  // 通过readToken函数已经圈定了范围
+  // 数字类型的范围为[token.start_, token.end_)
   Location current = token.start_;
   bool isNegative = *current == '-';
   if (isNegative)
@@ -561,21 +607,42 @@ bool Reader::decodeNumber(Token& token, Value& decoded) {
   Value::LargestUInt value = 0;
   while (current < token.end_) {
     Char c = *current++;
+    // 1. 有0~9之外的符号，尝试使用double试试, 从头开始 [token.start_, token.end_)
     if (c < '0' || c > '9')
       return decodeDouble(token, decoded);
     auto digit(static_cast<Value::UInt>(c - '0'));
+    // 2. 判断是否越界
+    // 可以去掉current != token.end_条件，优化为：效果一样。更加便于理解，current != token.end_只是提前一位返回
+    // value  > maxIntegerValue / 10 || ((value  == maxIntegerValue / 10) && (digit > maxIntegerValue % 10))
+
     if (value >= threshold) {
       // We've hit or exceeded the max value divided by 10 (rounded down). If
       // a) we've only just touched the limit, b) this is the last digit, and
       // c) it's small enough to fit in that rounding delta, we're okay.
       // Otherwise treat this number as a double to avoid overflow.
+
+      // value为上一轮解析后值，还没有加上当前位数的digit
+      // 2.1 value > threshold
+      //     由于 value > threshold = maxIntegerValue / 10
+      //     所以本轮 value * 10 + digit > maxIntegerValue + digit > maxIntegerValue, 溢出
+      // 2.2 value == threshold && current != token.end_
+      //     由于 current != token.end_ 说明除了本轮的digit以外，后面还有一轮，本轮不一定溢出，但下一轮必溢出
+      //     本轮 value * 10 + digit = threshold * 10 + digit = maxIntegerValue + digit
+      //     下一轮 (value * 10 + digit) * 10 + digit2 = (maxIntegerValue + digit) * 10 + digit2 必定溢出 
+      // 2.3 value == threshold && current == token.end_ && digit > maxIntegerValue % 10
+      //     由于current == token.end_ 说明当前为最后一轮，没有下一轮了
+      //     又由于 value == threshold = maxIntegerValue / 10
+      //     当本轮digit > maxIntegerValue 的个位数时会发生溢出，即digit > maxIntegerValue % 10时
+
       if (value > threshold || current != token.end_ ||
           digit > maxIntegerValue % 10) {
+        // 当前值发生溢出，尝试使用double试试，从头开始 [token.start_, token.end_)
         return decodeDouble(token, decoded);
       }
     }
     value = value * 10 + digit;
   }
+  // 边界值处理
   if (isNegative && value == maxIntegerValue)
     decoded = Value::minLargestInt;
   else if (isNegative)
@@ -587,6 +654,7 @@ bool Reader::decodeNumber(Token& token, Value& decoded) {
   return true;
 }
 
+// 解析double类型，当前没有调用？
 bool Reader::decodeDouble(Token& token) {
   Value decoded;
   if (!decodeDouble(token, decoded))
@@ -597,6 +665,7 @@ bool Reader::decodeDouble(Token& token) {
   return true;
 }
 
+// 使用stringstream解析
 bool Reader::decodeDouble(Token& token, Value& decoded) {
   double value = 0;
   String buffer(token.start_, token.end_);
@@ -614,6 +683,7 @@ bool Reader::decodeDouble(Token& token, Value& decoded) {
   return true;
 }
 
+// 解析string类型
 bool Reader::decodeString(Token& token) {
   String decoded_string;
   if (!decodeString(token, decoded_string))
@@ -626,13 +696,25 @@ bool Reader::decodeString(Token& token) {
 }
 
 bool Reader::decodeString(Token& token, String& decoded) {
+  // 排除前后的'"'
   decoded.reserve(static_cast<size_t>(token.end_ - token.start_ - 2));
+  // 包含string和前后两个'"'的范围为[token.start_, token.end_) 
+  // "...."
+  // ||   ||
+  // sc   ee_
+  // s = token.start_
+  // c = current
+  // e = end
+  // e_ = token.end_
   Location current = token.start_ + 1; // skip '"'
   Location end = token.end_ - 1;       // do not include '"'
+  // 此时 *current = 第一个字符，而 *end = '"'
   while (current != end) {
     Char c = *current++;
+    // 遇到'"'会返回, 由于经过readtoken,不存在该情况。当前分支应该走不进去!!!!
     if (c == '"')
       break;
+    // 转义符号
     if (c == '\\') {
       if (current == end)
         return addError("Empty escape sequence in string", token, current);
@@ -663,6 +745,7 @@ bool Reader::decodeString(Token& token, String& decoded) {
         decoded += '\t';
         break;
       case 'u': {
+        // 解析unicode编码
         unsigned int unicode;
         if (!decodeUnicodeCodePoint(token, current, end, unicode))
           return false;

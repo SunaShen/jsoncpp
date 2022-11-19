@@ -233,8 +233,10 @@ JSONCPP_NORETURN void throwLogicError(String const& msg) {
 // Notes: policy_ indicates if the string was allocated when
 // a string is stored.
 
+// arrayValue使用
 Value::CZString::CZString(ArrayIndex index) : cstr_(nullptr), index_(index) {}
 
+// objectValue使用
 Value::CZString::CZString(char const* str, unsigned length,
                           DuplicationPolicy allocate)
     : cstr_(str) {
@@ -243,6 +245,7 @@ Value::CZString::CZString(char const* str, unsigned length,
   storage_.length_ = length & 0x3FFFFFFF;
 }
 
+// 未体现index？因为index_和storage_是union，操作storage_一样的
 Value::CZString::CZString(const CZString& other) {
   cstr_ = (other.storage_.policy_ != noDuplication && other.cstr_ != nullptr
                ? duplicateStringValue(other.cstr_, other.storage_.length_)
@@ -292,7 +295,9 @@ Value::CZString& Value::CZString::operator=(CZString&& other) noexcept {
   return *this;
 }
 
+// 重载< ,用于作为map的key时排序
 bool Value::CZString::operator<(const CZString& other) const {
+  // arrayValue使用index排序，objectValue使用key的字典序排序
   if (!cstr_)
     return index_ < other.index_;
   // return strcmp(cstr_, other.cstr_) < 0;
@@ -867,6 +872,8 @@ ArrayIndex Value::size() const {
     return 0;
   case arrayValue: // size of the array is highest index + 1
     if (!value_.map_->empty()) {
+      // arrayValue存储结构 map<CString, Value>, 其中key应该是CString中的union结构的index计数
+      // 找到map中最后一个key的index
       ObjectValues::const_iterator itLast = value_.map_->end();
       --itLast;
       return (*itLast).first.index() + 1;
@@ -913,6 +920,7 @@ void Value::resize(ArrayIndex newSize) {
     clear();
   else if (newSize > oldSize)
     for (ArrayIndex i = oldSize; i < newSize; ++i)
+      // 创建arrayValue的元素，类似append？
       (*this)[i];
   else {
     for (ArrayIndex index = newSize; index < oldSize; ++index) {
@@ -929,10 +937,13 @@ Value& Value::operator[](ArrayIndex index) {
   if (type() == nullValue)
     *this = Value(arrayValue);
   CZString key(index);
+  // arrayValue中存储是有顺序的，按照index排序
+  // 查找，已经存在的话直接返回
   auto it = value_.map_->lower_bound(key);
   if (it != value_.map_->end() && (*it).first == key)
     return (*it).second;
 
+  // 不存在的话，直接创建
   ObjectValues::value_type defaultValue(key, nullSingleton());
   it = value_.map_->insert(it, defaultValue);
   return (*it).second;
@@ -985,6 +996,7 @@ void Value::dupPayload(const Value& other) {
     value_ = other.value_;
     break;
   case stringValue:
+    // 是other自己创建的string,不能直接复用,需要自己也重新创建
     if (other.value_.string_ && other.isAllocated()) {
       unsigned len;
       char const* str;
@@ -993,6 +1005,7 @@ void Value::dupPayload(const Value& other) {
       value_.string_ = duplicateAndPrefixStringValue(str, len);
       setIsAllocated(true);
     } else {
+      // 不是是other自己创建的string,直接复制指针即可
       value_.string_ = other.value_.string_;
     }
     break;
@@ -1041,6 +1054,7 @@ Value& Value::resolveReference(const char* key) {
       "in Json::Value::resolveReference(): requires objectValue");
   if (type() == nullValue)
     *this = Value(objectValue);
+  // 使用noDuplication,actualKey不拷贝key的内容，而直接使用key
   CZString actualKey(key, static_cast<unsigned>(strlen(key)),
                      CZString::noDuplication); // NOTE!
   auto it = value_.map_->lower_bound(actualKey);
@@ -1060,6 +1074,7 @@ Value& Value::resolveReference(char const* key, char const* end) {
       "in Json::Value::resolveReference(key, end): requires objectValue");
   if (type() == nullValue)
     *this = Value(objectValue);
+  // TODO : duplicateOnCopy == duplicate???
   CZString actualKey(key, static_cast<unsigned>(end - key),
                      CZString::duplicateOnCopy);
   auto it = value_.map_->lower_bound(actualKey);
@@ -1077,6 +1092,7 @@ Value Value::get(ArrayIndex index, const Value& defaultValue) const {
   return value == &nullSingleton() ? defaultValue : *value;
 }
 
+// TODO : 确定arrayValue中的index都是连续的？
 bool Value::isValidIndex(ArrayIndex index) const { return index < size(); }
 
 Value const* Value::find(char const* begin, char const* end) const {
@@ -1131,6 +1147,7 @@ Value& Value::append(Value&& value) {
   if (type() == nullValue) {
     *this = Value(arrayValue);
   }
+  // append接口保证index是连续的
   return this->value_.map_->emplace(size(), std::move(value)).first->second;
 }
 
@@ -1145,6 +1162,8 @@ bool Value::insert(ArrayIndex index, Value&& newValue) {
   if (index > length) {
     return false;
   }
+  // insert接口,每次判断index <=length, key保证最终的arrayObject的index是连续的
+  // 整体后移，新值插在index之后。。主要是为了交换map结构中的key中记录的index
   for (ArrayIndex i = length; i > index; i--) {
     (*this)[i] = std::move((*this)[i - 1]);
   }
@@ -1204,6 +1223,7 @@ bool Value::removeIndex(ArrayIndex index, Value* removed) {
   if (it == value_.map_->end()) {
     return false;
   }
+  // TODO : 使用 std::move?
   if (removed)
     *removed = it->second;
   ArrayIndex oldSize = size();
@@ -1248,6 +1268,7 @@ Value::Members Value::getMemberNames() const {
 
 static bool IsIntegral(double d) {
   double integral_part;
+  // 获取d的小数部分
   return modf(d, &integral_part) == 0.0;
 }
 
